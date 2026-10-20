@@ -1,0 +1,189 @@
+import torch
+import segmentation_models_pytorch as smp
+
+
+
+def output_to_label(logits):
+    """Map network output logits to a hard labels {0, 1, 2, 3, 4, 5} for each pixel in a batch.
+
+    Args:
+        logits (Tensor, (batch_size, num_classes, H, W)): Probabilities for each sample in a batch.
+    Returns:
+        pred (Tensor, (batch_size, H, W)): Hard label {0, 1, 2, 3, 4, 5} for each pixel in a batch
+    """
+    # Use argmax to find the class with the highest logit for each pixel
+    # dim=1 because the class dimension is the second dimension in the tensor
+    # Convert to long type for compatibility with loss functions
+    hard_preds = torch.argmax(logits, dim=1).long()
+    return hard_preds
+
+
+
+def training_loop(
+    model, optimizer, loss_fn, train_loader, val_loader, num_epochs, print_every=None):
+
+    print("Starting training")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model.to(device)
+    train_losses, train_metrics_miou, val_losses, val_metrics_miou = [], [], [], []
+
+    for epoch in range(1, num_epochs + 1):
+        model, train_loss, train_miou = train_epoch(
+            model, optimizer, loss_fn, train_loader, val_loader, device, print_every
+        )
+        print(
+            f"Epoch {epoch}/{num_epochs}: "
+            f"Avg. Train loss: {sum(train_loss)/len(train_loss):.3f}, "
+            f"Train mean IoU: {train_miou:.3f}")
+
+
+        # running the validate function will also
+        # print the validation loss and mean IoU for this epoch
+        # as well as the per-class IoU values for the validation set
+        val_loss, val_miou = validate(model, loss_fn, val_loader, device)
+
+
+        # train losses stored for each mini-batch
+        train_losses.extend(train_loss)
+
+        # train mean IoU stored for each epoch
+        train_metrics_miou.append(train_miou)
+
+        # val losses/metrics stored for each epoch
+        val_losses.append(val_loss)
+        val_metrics_miou.append(val_miou)
+
+    print("Training completed")
+    return model, train_losses, train_metrics_miou, val_losses, val_metrics_miou
+
+
+
+def train_epoch(
+    model, optimizer, loss_fn, train_loader, val_loader, device, print_every):
+    
+    # Train:
+    model.train()
+    train_loss_batches = []
+    tp_epoch, fp_epoch, fn_epoch, tn_epoch = [], [], [], []
+
+    num_batches = len(train_loader)
+    for batch_index, (x, y) in enumerate(train_loader, 1):
+
+        inputs, labels = x.to(device), y.to(device)
+        
+        optimizer.zero_grad()
+        logits = model.forward(inputs)
+
+        loss = loss_fn(logits, labels) #.float())
+        loss.backward()
+        optimizer.step()
+
+        train_loss_batches.append(loss.item())
+
+        hard_preds = output_to_label(logits)
+
+        # Calculate the mean intersection over union (mIoU) for this batch
+        # Compute pixel statistics
+        tp, fp, fn, tn = smp.metrics.get_stats(
+                hard_preds, labels, mode="multiclass", num_classes=model.n_class)
+        
+        tp_epoch.append(tp)
+        fp_epoch.append(fp)
+        fn_epoch.append(fn)
+        tn_epoch.append(tn)
+
+        # end of batch loop
+
+        # insert "print every" logic here if wanted
+        # code for this is commented out at the bottom of this file, 
+        # since it slows down training significantly 
+
+
+    # Compute the mean IoU for the entire epoch
+    tp_total = torch.cat(tp_epoch, dim=0)
+    fp_total = torch.cat(fp_epoch, dim=0)
+    fn_total = torch.cat(fn_epoch, dim=0)
+    tn_total = torch.cat(tn_epoch, dim=0)
+
+    train_miou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    return model, train_loss_batches, train_miou
+
+
+
+
+def validate(model, loss_fn, val_loader, device):
+    val_loss_cum = 0
+    tp_val, fp_val, fn_val, tn_val = [], [], [], []
+    
+    model.eval()
+    with torch.no_grad():
+        for batch_index, (x, y) in enumerate(val_loader, 1):
+            inputs, labels = x.to(device), y.to(device)
+            logits = model.forward(inputs)
+
+            batch_loss = loss_fn(logits, labels) #.float())
+            val_loss_cum += batch_loss.item()
+            
+            hard_preds = output_to_label(logits)
+
+            # Calculate the mean intersection over union (mIoU) for this batch
+            # Compute pixel statistics
+            tp, fp, fn, tn = smp.metrics.get_stats(
+                hard_preds, labels, mode="multiclass", num_classes=model.n_class)
+
+            tp_val.append(tp)
+            fp_val.append(fp)
+            fn_val.append(fn)
+            tn_val.append(tn)
+
+            # end of batch loop
+
+    # Compute the average validation loss over all batches
+    val_loss = val_loss_cum / len(val_loader)
+
+    # Compute the mean IoU for the entire epoch
+    tp_total = torch.cat(tp_val, dim=0)
+    fp_total = torch.cat(fp_val, dim=0)
+    fn_total = torch.cat(fn_val, dim=0)
+    tn_total = torch.cat(tn_val, dim=0)
+
+    val_miou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    
+    print(f"Val. loss: {val_loss:.3f}, "
+          f"Val. mean IoU: {val_miou:.3f}"
+        )
+
+    # Get per-class IoU values to see which specific class performace
+    # reduction="none" retains a tensor of length 6
+    per_class_iou = smp.metrics.iou_score(
+        tp_total, fp_total, fn_total, tn_total, reduction="none")
+
+    print("\nPer-class IoU of Validation Set:")
+    for class_idx, score in enumerate(per_class_iou):
+        print(f"  -> Class {class_idx} IoU: {score.item():.4f}")
+
+    return val_loss, val_miou
+
+
+
+
+
+# print every logic for training loop is commented out below.
+
+# If you want to print your progress more often than every epoch you can
+# set `print_every` to the number of batches you want between every status update.
+# Note that the print out will trigger a full validation on the full val. set => slows down training
+
+# if print_every is not None and batch_index % print_every == 0:
+#     val_loss, val_miou = validate(model, loss_fn, val_loader, device)
+#     model.train()
+#     print(
+#         f"\tBatch {batch_index}/{num_batches}: "
+#         f"\tTrain loss: {sum(train_loss_batches[-print_every:])/print_every:.3f}, "
+#         f"\tTrain mIoU: {train_miou:.3f}, "
+#         f"\tVal. loss: {val_loss:.3f}, "
+#         f"\tVal. mIoU: {val_miou:.3f}"
+#     )
