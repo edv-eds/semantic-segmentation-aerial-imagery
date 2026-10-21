@@ -1,5 +1,50 @@
 import torch
+import torch.nn as nn
 import segmentation_models_pytorch as smp
+
+
+class DiceFocalLoss(nn.Module):
+    """A loss function that combines Dice and Focal losses.
+
+    Combining loss function from the Segmentation Models PyTorch library (smp) 
+    to create a custom loss function that combines the strengths of both Dice Loss and Focal Loss.
+    
+    The Dice Loss is particularly effective for segmentation tasks, especially when dealing with imbalanced datasets.
+    It measures the overlap between the predicted segmentation and the ground truth, making it suitable for multi-class 
+    segmentation problems.
+    
+    The Focal Loss is designed to address class imbalance by down-weighting easy examples and focusing training on hard negatives.
+    The `gamma` parameter controls the focusing effect; a higher value means more focus on hard-to-classify examples.
+    
+    The weights `w1` and `w2` allow for adjusting the contribution of each loss component to the final loss value, 
+    providing flexibility in training.
+    """
+    
+    def __init__(self, w1=1.0, w2=1.0):
+        super(DiceFocalLoss, self).__init__()
+
+        # Define the Dice Loss component
+        self.lossDice = smp.losses.DiceLoss(mode='multiclass', log_loss=True, from_logits=True, smooth=1e-5)
+        
+        # Define the Focal Loss component 
+        self.lossFocal = smp.losses.FocalLoss(mode='multiclass', gamma=2.0)
+        
+        self.w1 = w1    # Weight for loss1
+        self.w2 = w2    # Weight for loss2
+
+
+    def forward(self, y_pred, y_true):
+        """A forward pass that computes the combined loss.
+        y_pred: [Batch, 6, Height, Width] (Raw logits from U-Net)
+        y_true: [Batch, Height, Width] (Integer class labels 0 to 5)
+        """
+        # Calculate individual losses
+        dice_loss = self.lossDice(y_pred, y_true)
+        focal_loss = self.lossFocal(y_pred, y_true)
+        
+        # Return weighted sum
+        return (self.w1 * dice_loss) + (self.w2 * focal_loss)
+
 
 
 
@@ -94,10 +139,12 @@ def train_epoch(
         tn_epoch.append(tn)
 
         # end of batch loop
+        print(f"Batch {batch_index}/{num_batches} completed")
+
 
         # insert "print every" logic here if wanted
         # code for this is commented out at the bottom of this file, 
-        # since it slows down training significantly 
+        # since it slows down training significantly
 
 
     # Compute the mean IoU for the entire epoch
