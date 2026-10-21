@@ -80,8 +80,8 @@ def training_loop(
             model, optimizer, loss_fn, train_loader, val_loader, device, print_every
         )
         print(
-            f"Epoch {epoch}/{num_epochs}: "
-            f"Avg. Train loss: {sum(train_loss)/len(train_loss):.3f}, "
+            f"Epoch {epoch}/{num_epochs}: \n"
+            f"Avg. Train loss: {sum(train_loss)/len(train_loss):.3f},  "
             f"Train mean IoU: {train_miou:.3f}")
 
 
@@ -145,7 +145,8 @@ def train_epoch(
         tn_epoch.append(tn)
 
         # end of batch loop
-        print(f"Batch {batch_index}/{num_batches} completed")
+        
+        # print(f"Batch {batch_index}/{num_batches} completed")
 
 
         # insert "print every" logic here if wanted
@@ -213,18 +214,20 @@ def validate(model, loss_fn, val_loader, device):
     val_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
 
     
-    print(f"Val. loss: {val_loss:.3f}, "
+    print(f"Avg. Val. loss: {val_loss:.3f}, "
           f"Val. mean IoU: {val_miou:.3f}"
         )
 
     # Get per-class IoU values to see which specific class performace
-    # reduction="none" retains a tensor of length 6
-    per_class_iou = smp.metrics.iou_score(
-        tp_total, fp_total, fn_total, tn_total, reduction="none")
+    tp_sum = tp_total.sum(dim=0)
+    fp_sum = fp_total.sum(dim=0)
+    fn_sum = fn_total.sum(dim=0)
+    per_class_iou = tp_sum / (tp_sum + fp_sum + fn_sum + 1e-7)
 
     print("\nPer-class IoU of Validation Set:")
     for class_idx, score in enumerate(per_class_iou):
         print(f"  -> Class {class_idx} IoU: {score.item():.4f}")
+    print()
 
     return val_loss, val_miou, val_f1_macro, val_accuracy
 
