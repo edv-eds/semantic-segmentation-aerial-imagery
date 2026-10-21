@@ -71,10 +71,12 @@ def training_loop(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model.to(device)
-    train_losses, train_metrics_miou, val_losses, val_metrics_miou = [], [], [], []
+
+    train_metrics = {"loss": [], "miou": [] , "f1_macro": [], "accuracy": []}
+    val_metrics = {"loss": [], "miou": [] , "f1_macro": [], "accuracy": []}
 
     for epoch in range(1, num_epochs + 1):
-        model, train_loss, train_miou = train_epoch(
+        model, train_loss, train_miou, train_f1_macro, train_accuracy = train_epoch(
             model, optimizer, loss_fn, train_loader, val_loader, device, print_every
         )
         print(
@@ -86,21 +88,25 @@ def training_loop(
         # running the validate function will also
         # print the validation loss and mean IoU for this epoch
         # as well as the per-class IoU values for the validation set
-        val_loss, val_miou = validate(model, loss_fn, val_loader, device)
+        val_loss, val_miou, val_f1_macro, val_accuracy = validate(model, loss_fn, val_loader, device)
 
 
         # train losses stored for each mini-batch
-        train_losses.extend(train_loss)
+        train_metrics["loss"].extend(train_loss)
 
-        # train mean IoU stored for each epoch
-        train_metrics_miou.append(train_miou)
+        # Remaining train metrics stored for each epoch
+        train_metrics["miou"].append(train_miou)
+        train_metrics["f1_macro"].append(train_f1_macro)
+        train_metrics["accuracy"].append(train_accuracy)
 
         # val losses/metrics stored for each epoch
-        val_losses.append(val_loss)
-        val_metrics_miou.append(val_miou)
+        val_metrics["loss"].append(val_loss)
+        val_metrics["miou"].append(val_miou)
+        val_metrics["f1_macro"].append(val_f1_macro)
+        val_metrics["accuracy"].append(val_accuracy)
 
     print("Training completed")
-    return model, train_losses, train_metrics_miou, val_losses, val_metrics_miou
+    return model, train_metrics, val_metrics
 
 
 
@@ -155,7 +161,11 @@ def train_epoch(
 
     train_miou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
 
-    return model, train_loss_batches, train_miou
+    train_f1_macro = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+    
+    train_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+
+    return model, train_loss_batches, train_miou, train_f1_macro, train_accuracy
 
 
 
@@ -198,6 +208,10 @@ def validate(model, loss_fn, val_loader, device):
 
     val_miou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
 
+    val_f1_macro = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    val_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+
     
     print(f"Val. loss: {val_loss:.3f}, "
           f"Val. mean IoU: {val_miou:.3f}"
@@ -212,7 +226,7 @@ def validate(model, loss_fn, val_loader, device):
     for class_idx, score in enumerate(per_class_iou):
         print(f"  -> Class {class_idx} IoU: {score.item():.4f}")
 
-    return val_loss, val_miou
+    return val_loss, val_miou, val_f1_macro, val_accuracy
 
 
 
