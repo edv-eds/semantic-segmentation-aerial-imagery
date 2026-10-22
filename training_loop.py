@@ -3,6 +3,7 @@ import torch.nn as nn
 import segmentation_models_pytorch as smp
 
 
+
 class DiceFocalLoss(nn.Module):
     """A loss function that combines Dice and Focal losses.
 
@@ -64,30 +65,43 @@ def output_to_label(logits):
 
 
 
+
+
 def training_loop(
-    model, optimizer, loss_fn, train_loader, val_loader, num_epochs, print_every=None):
+    model, optimizer, loss_fn, train_loader, val_loader, num_epochs, scheduler=None, print_every=None):
 
-    print("Starting training")
+    best_loss = float("inf")
+    best_miou = 0.0
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     model.to(device)
 
-    train_metrics = {"loss": [], "miou": [] , "f1_macro": [], "accuracy": []}
+    train_metrics = {"loss": [], "miou": [] , "f1_macro": [], "accuracy": [], "lr": []}
     val_metrics = {"loss": [], "miou": [] , "f1_macro": [], "accuracy": []}
 
+
+    print("Starting training")
+    
+    #  ---- TRAINING STARTS ----
+    #      Loop over epochs
     for epoch in range(1, num_epochs + 1):
+
+        # Train for one epoch
         model, train_loss, train_miou, train_f1_macro, train_accuracy = train_epoch(
             model, optimizer, loss_fn, train_loader, val_loader, device, print_every
         )
+
         print(
             f"Epoch {epoch}/{num_epochs}: \n"
             f"Avg. Train loss: {sum(train_loss)/len(train_loss):.3f},  "
-            f"Train mean IoU: {train_miou:.3f}")
+            f"Train mean IoU: {train_miou:.3f}, "
+            f"Learning Rate: {optimizer.param_groups[0]['lr']:.5f}, ")
 
 
-        # running the validate function will also
-        # print the validation loss and mean IoU for this epoch
-        # as well as the per-class IoU values for the validation set
+        # running the validate function will:
+        # collect validation metrics,
+        # print validation loss and mean IoU for this epoch,
+        # print per-class IoU values
         val_loss, val_miou, val_f1_macro, val_accuracy = validate(model, loss_fn, val_loader, device)
 
 
@@ -98,12 +112,27 @@ def training_loop(
         train_metrics["miou"].append(train_miou)
         train_metrics["f1_macro"].append(train_f1_macro)
         train_metrics["accuracy"].append(train_accuracy)
+        train_metrics["lr"].append(optimizer.param_groups[0]['lr'])
 
         # val losses/metrics stored for each epoch
         val_metrics["loss"].append(val_loss)
         val_metrics["miou"].append(val_miou)
         val_metrics["f1_macro"].append(val_f1_macro)
         val_metrics["accuracy"].append(val_accuracy)
+
+
+        # Update the learning rate scheduler if provided
+        # Step the scheduler based on validation loss
+        if scheduler is not None:
+            scheduler.step(val_loss)  
+
+
+        # Save the model if it has the best validation loss or best validation mIoU
+        if epoch > 10 and val_loss < best_loss and val_miou > best_miou:
+            best_loss = val_loss
+            best_miou = val_miou
+            torch.save(model.state_dict(), f"{model.__class__.__name__}_best_model.pth")
+            print(f"Best model saved after epoch {epoch}. \n")
 
     print("Training completed")
     return model, train_metrics, val_metrics
@@ -119,14 +148,16 @@ def train_epoch(
     tp_epoch, fp_epoch, fn_epoch, tn_epoch = [], [], [], []
 
     num_batches = len(train_loader)
+    
     for batch_index, (x, y) in enumerate(train_loader, 1):
 
         inputs, labels = x.to(device), y.to(device)
         
         optimizer.zero_grad()
+        
         logits = model.forward(inputs)
-
-        loss = loss_fn(logits, labels) #.float())
+        loss = loss_fn(logits, labels)
+        
         loss.backward()
         optimizer.step()
 
@@ -145,9 +176,9 @@ def train_epoch(
         tn_epoch.append(tn)
 
         # end of batch loop
-        
-        # print(f"Batch {batch_index}/{num_batches} completed")
 
+
+        # print(f"Batch {batch_index}/{num_batches} completed")
 
         # insert "print every" logic here if wanted
         # code for this is commented out at the bottom of this file, 
@@ -181,7 +212,7 @@ def validate(model, loss_fn, val_loader, device):
             inputs, labels = x.to(device), y.to(device)
             logits = model.forward(inputs)
 
-            batch_loss = loss_fn(logits, labels) #.float())
+            batch_loss = loss_fn(logits, labels)
             val_loss_cum += batch_loss.item()
             
             hard_preds = output_to_label(logits)
@@ -231,6 +262,89 @@ def validate(model, loss_fn, val_loader, device):
 
     return val_loss, val_miou, val_f1_macro, val_accuracy
 
+
+
+def confusion_matrix_6x6(hard_preds, labels):
+    """Return a 6x6 confusion matrix for one batch of segmentation labels.
+
+    Rows represent the true class and columns represent the predicted class.
+    """
+    hard_preds = hard_preds.reshape(-1).long()
+    labels = labels.reshape(-1).long()
+    idx = labels * 6 + hard_preds
+    
+    matrix = torch.bincount(idx, minlength=6**2).reshape(6, 6)
+    
+    return matrix
+
+
+
+def test_score(model, loss_fn, test_loader):
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    conf_matrix = torch.zeros((6, 6), dtype=torch.int64)
+
+    tp_, fp_, fn_, tn_ = [], [], [], []
+    
+    model.eval()
+    with torch.no_grad():
+        for batch_index, (x, y) in enumerate(test_loader, 1):
+            inputs, labels = x.to(device), y.to(device)
+            logits = model.forward(inputs)
+
+            # No need for loss of test data
+            #batch_loss = loss_fn(logits, labels)
+
+            hard_preds = output_to_label(logits)
+
+            # Calculate the mean intersection over union (mIoU) for this batch
+            # Compute pixel statistics
+            tp, fp, fn, tn = smp.metrics.get_stats(
+                hard_preds, labels, mode="multiclass", num_classes=model.n_class)
+
+            tp_.append(tp)
+            fp_.append(fp)
+            fn_.append(fn)
+            tn_.append(tn)
+
+            conf_matrix += confusion_matrix_6x6(hard_preds, labels).cpu()
+
+            # end of batch loop
+
+
+
+    # Compute the mean IoU for the entire epoch
+    tp_total = torch.cat(tp_, dim=0)
+    fp_total = torch.cat(fp_, dim=0)
+    fn_total = torch.cat(fn_, dim=0)
+    tn_total = torch.cat(tn_, dim=0)
+
+    test_miou = smp.metrics.iou_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    test_f1_macro = smp.metrics.f1_score(tp_total, fp_total, fn_total, tn_total, reduction="macro").item()
+
+    test_accuracy = smp.metrics.accuracy(tp_total, fp_total, fn_total, tn_total, reduction="micro").item()
+
+    
+    print(f"Test mean IoU: {test_miou:.3f}")
+    print(f"Test F1 Score (macro): {test_f1_macro:.3f}")
+    print(f"Test Accuracy: {test_accuracy:.3f}")
+
+    # Get per-class IoU values to see which specific class performace
+    tp_sum = tp_total.sum(dim=0)
+    fp_sum = fp_total.sum(dim=0)
+    fn_sum = fn_total.sum(dim=0)
+    per_class_iou = tp_sum / (tp_sum + fp_sum + fn_sum + 1e-7)
+
+    print("\nPer-class IoU of Test set:")
+    for class_idx, score in enumerate(per_class_iou):
+        print(f"  -> Class {class_idx} IoU: {score.item():.4f}")
+    print()
+
+
+    return conf_matrix, test_miou, test_f1_macro, test_accuracy
 
 
 

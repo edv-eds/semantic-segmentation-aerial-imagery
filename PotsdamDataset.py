@@ -6,7 +6,7 @@ import tifffile as tiff
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import Compose, ToTensor
+from torchvision.transforms import Compose, ToTensor, Normalize
 import albumentations as A
 
 
@@ -68,8 +68,12 @@ class PotsdamDataset(Dataset):
             label = augmented["mask"]
 
 
-        # Convert the image to PyTorch tensors, normalize the pixel values to [0, 1], rearrange the dimensions to (channels, height, width)
-        img_transform = Compose([ToTensor()])
+        # Convert the image to PyTorch tensors, 
+        # rearrange the dimensions to (channels, height, width)
+        # Normalize the pixel values to range [-1, 1]
+        img_transform = Compose([ToTensor(), 
+                                 Normalize((0.5,), (0.5,)),
+                                 ])
         img = img_transform(img)
 
         # Convert the label to a long tensor for PyTorch
@@ -82,6 +86,28 @@ class PotsdamDataset(Dataset):
     def __len__(self):
         """Total number of samples"""
         return len(self._samples)
+
+
+    def get_img_id(self, index):
+        """Get the id of the image at the given index
+            
+            example image name: 
+                small_val_patches/images/top_potsdam_2_10_256_1280.tif
+            stem of image name: 
+                top_potsdam_2_10_256_1280
+
+        Args:
+            index (int): The index of the sample in the dataset.
+
+        Returns:
+            str: The id of the image, e.g. "2_10_256_1280"
+        """
+        img_path, _ = self._samples[index]
+
+        # Extract the id from the filename, which is in the format "top_potsdam_<id>.tif"
+        img_id = img_path.stem.split("_", 2)[-1]  # Get the part after the first two underscores
+        
+        return img_id
 
 
 
